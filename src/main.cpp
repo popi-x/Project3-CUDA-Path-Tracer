@@ -410,7 +410,7 @@ void saveImage()
 
     std::string filename = renderState->imageName;
     std::ostringstream ss;
-    ss << filename << "." << startTimeString << "." << samples << "samp";
+    ss << "../img/" << filename << "." << startTimeString << "." << samples << "samp"; //EDITED: change save path to img folder
     filename = ss.str();
 
     // CHECKITOUT

@@ -7,6 +7,7 @@
 #include <thrust/random.h>
 #include <thrust/remove.h>
 #include <thrust/partition.h>
+#include <thrust/sort.h>
 
 #include "sceneStructs.h"
 #include "scene.h"
@@ -368,10 +369,17 @@ __global__ void finalGather(int nPaths, glm::vec3* image, PathSegment* iteration
 }
 
 // helper struct
+
 struct isPathAlive {
     __host__ __device__ bool operator()(const PathSegment& p) {
         return p.remainingBounces > 0;
     }
+};
+
+struct idSmallerThan {
+    __host__ __device__ bool operator()(const ShadeableIntersection& a, const ShadeableIntersection& b) {
+        return a.materialId < b.materialId;
+	}
 };
 
 /**
@@ -470,6 +478,8 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             dev_paths,
             dev_materials
         );*/
+		if (SORT_MAT == 1)
+		    thrust::sort_by_key(thrust::device, dev_intersections, dev_intersections + num_paths, dev_paths, idSmallerThan());
 
         shadeMaterial<<<numblocksPathSegmentTracing, blockSize1d>>>(
             iter,

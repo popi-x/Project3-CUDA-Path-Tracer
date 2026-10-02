@@ -25,6 +25,10 @@
 #define RUSSIAN_ROULETTE 1
 #define RUSSIAN_ROULETTE_DEPTH 3
 
+//better monte-carlo samping
+#define BETTER_SAMPLING 1
+#define GRID_SIZE 4
+
 
 
 #define FILENAME (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
@@ -136,6 +140,30 @@ void pathtraceFree()
     checkCUDAError("pathtraceFree");
 }
 
+__host__ __device__ glm::vec2 betterSample2D(
+    int iter, int pixelIndex, unsigned int salt,
+    thrust::default_random_engine& rng)
+{
+	thrust::uniform_real_distribution<float> u01(0, 1);
+
+	const unsigned int n = GRID_SIZE * GRID_SIZE;
+	unsigned int j = (unsigned int)iter % n;
+	unsigned int block = (unsigned int)iter / n;
+    
+    unsigned int h = utilhash((unsigned int)pixelIndex ^ utilhash(block * 2654435761u + salt));
+    unsigned int a = ((h >> 8) % n) | 1u;
+    unsigned int b = h % n;
+    unsigned int k = (a * j + b) % n;
+
+    unsigned int cx = k % GRID_SIZE;
+    unsigned int cy = k / GRID_SIZE;
+
+    return glm::vec2((cx + u01(rng)) / (float)GRID_SIZE,
+        (cy + u01(rng)) / (float)GRID_SIZE);
+
+}
+
+
 
 
 /**
@@ -164,14 +192,20 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
 		thrust::uniform_real_distribution<float> u01(0, 1);
         
         float jx, jy;
+		jx = 0.0f;
+		jy = 0.0f;
 
-        if (ANTIALIASING == 0) {
-            jx = 0.0f;
-            jy = 0.0f;
-        }
-        else {
-            jx = uJitter(rng);
-            jy = uJitter(rng);
+        if (ANTIALIASING == 1) {
+            if (BETTER_SAMPLING == 1) 
+            { 
+                glm::vec2 s = betterSample2D(iter, index, 0x1234u, rng);
+                jx = s.x - 0.5f;
+                jy = s.y - 0.5f;
+            }
+            else {
+                jx = uJitter(rng);
+                jy = uJitter(rng);
+            }
         }
         
         segment.ray.direction = glm::normalize(cam.view
@@ -184,12 +218,23 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
 
         if (cam.aperture <= 0.0f) return;
 
-        //won't work is the camera doesn't have depth of field setup
+        //won't work if the camera doesn't have depth of field setup
 		float ft = cam.focalDistance / dot(segment.ray.direction, cam.view);
 		glm::vec3 fP = segment.ray.origin + ft * segment.ray.direction; //focal point
 
-		float angle = 2 * PI * u01(rng);
-		float r = cam.aperture * sqrt(u01(rng));
+        float u1, u2;
+        if (BETTER_SAMPLING) {
+			glm::vec2 s = betterSample2D(iter, index, 0x5678u, rng);
+			u1 = s.x;
+			u2 = s.y;
+        }
+        else {
+			u1 = u01(rng);
+			u2 = u01(rng);
+        }
+
+		float angle = 2 * PI * u1;
+		float r = cam.aperture * sqrt(u2);
 		float dx = r * cos(angle);
 		float dy = r * sin(angle);
 

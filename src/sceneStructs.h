@@ -57,6 +57,10 @@ struct Camera
     glm::vec3 right;
     glm::vec2 fov;
     glm::vec2 pixelLength;
+
+    //params for depth of field
+    float aperture;
+    float focalDistance;
 };
 
 struct RenderState
@@ -66,6 +70,7 @@ struct RenderState
     int traceDepth;
     std::vector<glm::vec3> image;
     std::string imageName;
+    
 };
 
 struct PathSegment
@@ -84,4 +89,5 @@ struct ShadeableIntersection
   float t;
   glm::vec3 surfaceNormal;
   int materialId;
+  bool outside; // true if the intersection was from outside the surface, false if it was from inside
 };

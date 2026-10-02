@@ -18,9 +18,14 @@
 #include "interactions.h"
 
 #define ERRORCHECK 1
+
 #define ANTIALIASING 1
 #define STREAM_COMPACTION 1
-#define SORT_MAT 1
+#define SORT_MAT 0
+#define RUSSIAN_ROULETTE 1
+#define RUSSIAN_ROULETTE_DEPTH 3
+
+
 
 #define FILENAME (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
 #define checkCUDAError(msg) checkCUDAErrorFn(msg, FILENAME, __LINE__)
@@ -156,6 +161,7 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
         // TODO: implement antialiasing by jittering the ray
         thrust::default_random_engine rng = makeSeededRandomEngine(iter, index, 0);
         thrust::uniform_real_distribution<float> uJitter(-0.5f, 0.5f);
+		thrust::uniform_real_distribution<float> u01(0, 1);
         
         float jx, jy;
 
@@ -175,6 +181,20 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
 
         segment.pixelIndex = index;
         segment.remainingBounces = traceDepth;
+
+        if (cam.aperture <= 0.0f) return;
+
+        //won't work is the camera doesn't have depth of field setup
+		float ft = cam.focalDistance / dot(segment.ray.direction, cam.view);
+		glm::vec3 fP = segment.ray.origin + ft * segment.ray.direction; //focal point
+
+		float angle = 2 * PI * u01(rng);
+		float r = cam.aperture * sqrt(u01(rng));
+		float dx = r * cos(angle);
+		float dy = r * sin(angle);
+
+        segment.ray.origin = cam.position + cam.right * dx + cam.up * dy;
+		segment.ray.direction = glm::normalize(fP - segment.ray.origin);
     }
 }
 
@@ -202,6 +222,7 @@ __global__ void computeIntersections(
         float t_min = FLT_MAX;
         int hit_geom_index = -1;
         bool outside = true;
+        bool hit_outside = true;
 
         glm::vec3 tmp_intersect;
         glm::vec3 tmp_normal;
@@ -230,6 +251,7 @@ __global__ void computeIntersections(
                 hit_geom_index = i;
                 intersect_point = tmp_intersect;
                 normal = tmp_normal;
+				hit_outside = outside;
             }
         }
 
@@ -243,12 +265,14 @@ __global__ void computeIntersections(
             intersections[path_index].t = t_min;
             intersections[path_index].materialId = geoms[hit_geom_index].materialid;
             intersections[path_index].surfaceNormal = normal;
+			intersections[path_index].outside = hit_outside;
         }
     }
 }
 
 __global__ void shadeMaterial(
     int iter,
+    int depth,
     int num_paths,
     ShadeableIntersection* shadeableIntersections,
     PathSegment* pathSegments,
@@ -284,10 +308,21 @@ __global__ void shadeMaterial(
             else {
                 glm::vec3 intersectPt = getPointOnRay(pathSegments[idx].ray, intersection.t);
 
-                scatterRay(pathSegments[idx], intersectPt, intersection.surfaceNormal, material, rng);
+                scatterRay(pathSegments[idx], intersectPt, intersection.surfaceNormal, intersection.outside, material, rng);
                 pathSegments[idx].remainingBounces--;
                 
                 if (pathSeg.remainingBounces == 0) pathSeg.color = glm::vec3(0.0f);
+				else if (RUSSIAN_ROULETTE == 1 && depth > RUSSIAN_ROULETTE_DEPTH) { //implement Russian Roulette
+					float maxColor = glm::min(1.0f, glm::max(pathSeg.color.r, glm::max(pathSeg.color.g, pathSeg.color.b)));
+                    
+                    if (u01(rng) >= maxColor){
+                        pathSeg.remainingBounces = 0;
+                        pathSeg.color = glm::vec3(0.0f);
+                    }
+                    else {
+                        pathSeg.color /= maxColor;
+                    }
+                }
             }
             // If there was no intersection, color the ray black.
             // Lots of renderers use 4 channel color, RGBA, where A = alpha, often
@@ -483,6 +518,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
 
         shadeMaterial<<<numblocksPathSegmentTracing, blockSize1d>>>(
             iter,
+            depth,
             num_paths,
             dev_intersections,
             dev_paths,

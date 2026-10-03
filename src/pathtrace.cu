@@ -29,6 +29,8 @@
 #define BETTER_SAMPLING 1
 #define GRID_SIZE 4
 
+#define DIRECT_LIGHTING 1
+#define DIRECT_LIGHTING_MAX_WEIGHT 10.0f
 
 
 #define FILENAME (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
@@ -94,6 +96,8 @@ static Geom* dev_geoms = NULL;
 static Material* dev_materials = NULL;
 static PathSegment* dev_paths = NULL;
 static ShadeableIntersection* dev_intersections = NULL;
+static int* dev_lights = NULL;
+static int num_lights = 0;
 // TODO: static variables for device memory, any extra info you need, etc
 // ...
 
@@ -123,7 +127,17 @@ void pathtraceInit(Scene* scene)
     cudaMalloc(&dev_intersections, pixelcount * sizeof(ShadeableIntersection));
     cudaMemset(dev_intersections, 0, pixelcount * sizeof(ShadeableIntersection));
 
-    // TODO: initialize any extra device memeory you need
+    std::vector<int> lightIndices;
+    for (int i = 0; i < scene->geoms.size(); i++) {
+        if (scene->materials[scene->geoms[i].materialid].emittance > 0.0f) {
+            lightIndices.push_back(i);
+        }
+    }
+    num_lights = lightIndices.size();
+    cudaMalloc(&dev_lights, glm::max(num_lights, 1) * sizeof(int));
+    if (num_lights > 0) {
+        cudaMemcpy(dev_lights, lightIndices.data(), num_lights * sizeof(int), cudaMemcpyHostToDevice);
+    }
 
     checkCUDAError("pathtraceInit");
 }
@@ -135,7 +149,7 @@ void pathtraceFree()
     cudaFree(dev_geoms);
     cudaFree(dev_materials);
     cudaFree(dev_intersections);
-    // TODO: clean up any extra device memory you created
+    cudaFree(dev_lights);
 
     checkCUDAError("pathtraceFree");
 }
@@ -315,13 +329,41 @@ __global__ void computeIntersections(
     }
 }
 
+__host__ __device__ void sampleCubeLight(
+    const Geom& light, thrust::default_random_engine& rng,
+    glm::vec3& point, glm::vec3& normal, float& area)
+{
+    thrust::uniform_real_distribution<float> u01(0, 1);
+
+    glm::vec3 s = glm::abs(light.scale);
+    float ax = s.y * s.z;
+    float ay = s.x * s.z;
+    float az = s.x * s.y;
+    area = 2.0f * (ax + ay + az);
+
+    float pick = u01(rng) * (ax + ay + az);
+    int axis = (pick < ax) ? 0 : ((pick < ax + ay) ? 1 : 2);
+    float side = (u01(rng) < 0.5f) ? -0.5f : 0.5f;
+
+    glm::vec3 p(u01(rng) - 0.5f, u01(rng) - 0.5f, u01(rng) - 0.5f);
+    p[axis] = side;
+    glm::vec3 n(0.0f);
+    n[axis] = (side > 0.0f) ? 1.0f : -1.0f;
+
+    point = multiplyMV(light.transform, glm::vec4(p, 1.0f));
+    normal = glm::normalize(multiplyMV(light.invTranspose, glm::vec4(n, 0.0f)));
+}
+
 __global__ void shadeMaterial(
     int iter,
     int depth,
     int num_paths,
     ShadeableIntersection* shadeableIntersections,
     PathSegment* pathSegments,
-    Material* materials)
+    Material* materials,
+    Geom* geoms,
+    int* lights,
+    int num_lights)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < num_paths)
@@ -357,6 +399,40 @@ __global__ void shadeMaterial(
                 pathSegments[idx].remainingBounces--;
                 
                 if (pathSeg.remainingBounces == 0) pathSeg.color = glm::vec3(0.0f);
+                else if (DIRECT_LIGHTING == 1 && pathSeg.remainingBounces == 1
+                    && material.hasRefractive <= 0.0f && num_lights > 0)
+                {
+                    int li = glm::min((int)(u01(rng) * num_lights), num_lights - 1);
+                    const Geom& light = geoms[lights[li]];
+
+                    if (light.type == CUBE)
+                    {
+                        glm::vec3 lightPoint, lightNormal;
+                        float lightArea;
+                        sampleCubeLight(light, rng, lightPoint, lightNormal, lightArea);
+
+                        glm::vec3 origin = intersectPt + 0.001f * intersection.surfaceNormal;
+                        glm::vec3 toLight = lightPoint - origin;
+                        float dist2 = glm::dot(toLight, toLight);
+                        glm::vec3 wi = toLight / sqrtf(dist2);
+
+                        float cosSurface = glm::dot(intersection.surfaceNormal, wi);
+                        float cosLight = glm::dot(lightNormal, -wi);
+
+                        if (cosSurface > 0.0f && cosLight > 0.0f)
+                        {
+                            pathSeg.ray.origin = origin;
+                            pathSeg.ray.direction = wi;
+                            float weight = cosSurface * cosLight * lightArea * (float)num_lights / (PI * dist2);
+                            pathSeg.color *= glm::min(weight, DIRECT_LIGHTING_MAX_WEIGHT);
+                        }
+                        else
+                        {
+                            pathSeg.color = glm::vec3(0.0f);
+                            pathSeg.remainingBounces = 0;
+                        }
+                    }
+                }
 				else if (RUSSIAN_ROULETTE == 1 && depth > RUSSIAN_ROULETTE_DEPTH) { //implement Russian Roulette
 					float maxColor = glm::min(1.0f, glm::max(pathSeg.color.r, glm::max(pathSeg.color.g, pathSeg.color.b)));
                     
@@ -567,7 +643,10 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             num_paths,
             dev_intersections,
             dev_paths,
-            dev_materials
+            dev_materials,
+            dev_geoms,
+            dev_lights,
+            num_lights
         );
         
 		if (STREAM_COMPACTION == 1)

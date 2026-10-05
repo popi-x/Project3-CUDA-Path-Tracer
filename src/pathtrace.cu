@@ -19,7 +19,7 @@
 
 #define ERRORCHECK 1
 
-#define ANTIALIASING 1
+#define ANTIALIASING 0
 #define STREAM_COMPACTION 1
 #define SORT_MAT 0
 #define RUSSIAN_ROULETTE 1
@@ -651,6 +651,8 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         
 		if (STREAM_COMPACTION == 1)
             num_paths = thrust::partition(thrust::device, dev_paths, dev_paths + num_paths, isPathAlive()) - dev_paths;
+
+        if (iter == 10) printf("depth %d: %d\n", depth, num_paths);
         
         iterationComplete = num_paths == 0 || depth >= traceDepth ? true : false; // TODO: should be based off stream compaction results.
 

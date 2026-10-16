@@ -112,19 +112,16 @@ In the Cornell box the same comparison at 16 samples shows no visible difference
 
 ### Direct lighting
 
-The final ray of each path is aimed at a uniformly sampled point on an emissive cube instead of a BSDF-sampled direction, weighted by the area-to-solid-angle conversion. Occlusion needs no extra code: the ray goes through the normal intersection pass, and if it hits anything other than the light the path ends with no contribution. It applies to diffuse surfaces only.
+On diffuse surfaces, the final ray of each path is aimed at a random point on a light instead of a random direction, and its contribution is scaled by the light's distance and angle. If the ray hits anything other than the light, the path contributes nothing, so shadows need no extra code. Because only the final ray changes, the effect is largest at low trace depths.
 
-Because only the final ray changes, the effect is largest at low trace depths.
-
-The weight is clamped (`DIRECT_LIGHTING_MAX_WEIGHT`). Without the clamp, a final vertex lying within a few centimetres of the light makes the 1/d² term explode and leaves isolated white pixels anywhere in the image. The clamp introduces a small bias confined to a narrow band around the light.
+The weight is clamped (`DIRECT_LIGHTING_MAX_WEIGHT`). Without the clamp, a final vertex lying within a few centimetres of the light makes the 1/d² term explode and leaves isolated white pixels anywhere in the image.
 
 | Before clamping (fireflies) | After clamping |
 |---|---|
 | <img src="img/cornell.direct-lighting.png" width="380"> | <img src="img/cornell.direct_lighting_improved.png" width="380"> |
 
-*GPU vs CPU:* the same computation, but on the GPU the light sample reuses the existing wavefront — no separate shadow-ray kernel is launched.
+*GPU vs CPU:* the same computation, but on the GPU the light sample reuses the existing wavefront, so no separate shadow-ray kernel is launched.
 
-*Further work:* next event estimation at every bounce with multiple importance sampling, and support for spherical lights.
 
 At trace depth 2 the final ray is half of every path, which makes the effect easy to see. Both images are 200 samples:
 
@@ -132,19 +129,18 @@ At trace depth 2 the final ray is half of every path, which makes the effect eas
 |---|---|
 | <img src="img/dl_off_depth2.png" width="380"> | <img src="img/dl_on_depth2.png" width="380"> |
 
-The two images have the same average brightness (measured on the floor, the back wall and both side walls, they agree to within one grey level), but the pixel noise on the floor is 4.3 times lower with direct lighting. Since noise falls with the square root of the sample count, the BSDF-sampled image would need roughly 18 times as many samples to look as clean. The speckles on the ceiling next to the light are the region where the weight is clamped.
+The two images have the same average brightness, but the pixel noise on the floor is lower with direct lighting. The speckles on the ceiling next to the light are the region where the weight is clamped.
 
 ### Russian roulette
 
-From the fourth bounce on, a path survives with probability equal to the largest component of its throughput, and survivors are divided by that probability so the expected value is unchanged. Dim paths that would contribute almost nothing are dropped early. Brightness matches the reference with it enabled.
+From the fourth bounce on, a path survives with probability equal to the largest component of its throughput, and survivors are divided by that probability so the expected value is unchanged. Dim paths that would contribute almost nothing are dropped early. 
 
 *GPU vs CPU:* on a CPU a terminated path simply stops costing anything. On the GPU the saving only materialises together with stream compaction, which is what actually removes the terminated paths from later kernel launches.
 
-*Further work:* use luminance-weighted throughput and a minimum termination probability, as PBRT does.
 
 ## Performance analysis
 
-All timings are for 800 x 800, Release build, trace depth 8, read from the ms/frame counter after it settles. Unless stated otherwise: pinhole camera, with antialiasing, material sorting, stratified sampling and direct lighting off.
+All timings are for 800 x 800, Release build, trace depth 8, read from the ms/frame counter after it settles. Unless stated otherwise: pinhole camera, with antialiasing, material sorting, stratified sampling and direct lighting **off**.
 
 ### Stream compaction
 
@@ -167,7 +163,7 @@ In the closed box no ray can escape. A path only ends by reaching the light, whi
 | Open Cornell box | 17 | 20 |
 | Closed box | 20 | 33 |
 
-Despite halving the work in the open box, compaction made both scenes slower. Two reasons:
+Despite halving the work in the open box, compaction made both scenes slower. There are two possible reasons:
 
 * A terminated path is cheap without compaction. The shading kernel returns on its first line when `remainingBounces` is 0, and the intersection kernel only has 8 primitives to test, so a dead thread costs very little. Compaction removes threads that were doing almost no work.
 * `thrust::partition` is expensive. It runs once per bounce over an array of full `PathSegment` structs, and each call moves a large part of that array. With so few primitives the intersection kernel is cheap enough that the partition costs more than the bounce it is trying to shorten.
@@ -193,7 +189,7 @@ Stream compaction on in both columns.
 | Open Cornell box | 20 | 20 |
 | Closed box | 33 | 29 |
 
-In the open box Russian roulette removes 39% of the paths at bounce 4 and 61% by bounce 7 (table above), but the frame time does not move. It only acts on the last four bounces, which were already the cheapest ones: the total number of path-bounces drops by 13%, and the saving is below the resolution of the frame counter.
+In the open box Russian roulette removes 39% of the paths at bounce 4 and 61% by bounce 7 (table above), but the frame time does not move. 
 
 In the closed box it is 12% faster. There, without Russian roulette nearly every path survives to the final bounce, so roulette is the only thing shrinking the array and it gives compaction something to remove.
 
@@ -216,8 +212,8 @@ Direct lighting does change the path counts: the number of paths entering the la
 
 | | |
 |---|---|
-| <img src="img/cornell.blooper.png" width="380"> | <img src="img/cornell.blooper2.png" width="380"> |
-| **Black light, washed-out walls.** The loop stopped after two bounces, and paths that never reached the light were still added to the image with their leftover throughput. Meanwhile paths that *had* reached the light were being zeroed on the following bounce. | **Almost black.** Every terminated path was zeroed at the top of the shading kernel, including the ones that ended by hitting the light. Only paths that reached the light on the very last bounce survived. |
+| <img src="img/cornell.blooper.png" width="450"> | <img src="img/cornell.blooper2.png" width="450"> |
+| **Black light, brighter lighting** | **Almost black.** |
 
 ## Scene file changes
 
